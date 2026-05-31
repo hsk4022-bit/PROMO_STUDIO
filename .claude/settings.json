@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__d8e7b1bf-2780-4e75-b408-05065572a045__notion-fetch",
+      "mcp__d8e7b1bf-2780-4e75-b408-05065572a045__notion-search",
+      "mcp__d8e7b1bf-2780-4e75-b408-05065572a045__notion-query-data-sources",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "mcp__Claude_Preview__preview_screenshot"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "INPUT=$(cat); if echo \"$INPUT\" | grep -qE '\"file_path\":\\s*\"[^\"]*notion_data\\.json\"'; then echo '🚫 notion_data.json 직접 작성/편집 금지 — build_notion_data.py 만 사용 (./run_pipeline.sh 통해 호출).' >&2; exit 2; fi; exit 0"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": []
+  }
+}

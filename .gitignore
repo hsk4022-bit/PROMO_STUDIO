@@ -1,0 +1,43 @@
+# 환경변수 (개인 설정/시크릿)
+.env
+.env.local
+
+# 노션 데이터 캐시 (런타임 fetch 결과)
+**/notion_data.json
+**/notion_data_*.json
+**/.cache/
+
+# 테스트 산출물 심볼릭 링크 (Downloads/PROMO_* 로 연결됨, 해시 폴더명)
+promo-editor/jhfl20xlqz11h6xh
+
+# Claude Code 작업 세션
+**/.claude/worktrees/
+**/.claude/.backup-*/
+.claude/sessions/
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+
+# Node
+node_modules/
+
+# 산출물 (로컬 작업)
+PROMO_*/
+output_*.html
+hero_*.png
+hero_*.jpg
+
+# 로컬 백업 스냅샷 (app.js 분리 stage 별)
+backups/
