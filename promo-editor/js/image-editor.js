@@ -668,11 +668,17 @@
                 }
             });
 
-            const finalTextColor = isDarkColor(color) ? '#ffffff' : '#1e293b';
-            area.style.color = finalTextColor;
-            // se-contents에도 color 명시 — innerHTML로 저장 시 상속 텍스트 색상이 보존되도록
-            const seContents = area.querySelector('.se-contents');
-            if (seContents) seContents.style.color = finalTextColor;
+            // [2026-05-31] noColorAdjust=true(불러오기) 면 기본 텍스트 색도 건드리지 않는다 — 불러온 HTML 의
+            //   색 체계 그대로 보존. 이전엔 이 area/se-contents 기본색 설정이 게이트 밖이라, 불러오기 시
+            //   accent 배경 위 텍스트(명시색 없는 상속분: 날짜박스/넘버배지 등)가 어두워지는 회귀가 있었음.
+            //   아래 재색칠 루프와 동일하게 게이트.
+            if (!noColorAdjust) {
+                const finalTextColor = isDarkColor(color) ? '#ffffff' : '#1e293b';
+                area.style.color = finalTextColor;
+                // se-contents에도 color 명시 — innerHTML로 저장 시 상속 텍스트 색상이 보존되도록
+                const seContents = area.querySelector('.se-contents');
+                if (seContents) seContents.style.color = finalTextColor;
+            }
 
             // 불러오기 시에는 텍스트 색 자동교체 비활성화 — 저장된 색상 그대로 유지
             if (!noColorAdjust) {

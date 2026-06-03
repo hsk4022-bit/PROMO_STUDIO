@@ -738,6 +738,11 @@
                 tbl.style.borderCollapse = 'collapse';
                 if (!tbl.style.width) tbl.style.width = '100%';
                 if (!tbl.style.tableLayout) tbl.style.tableLayout = 'fixed';
+                // [2026-06-01] 표 상단 라인 — 본문 행 구분선과 동일한 라인을 table 상단에 추가 (사용자 결정).
+                //   기존 정책(외곽 상단 라인 없음)에서 변경: 헤더 bg 없는 표가 상단 경계 없이 떠 보이는 문제.
+                //   행 구분선(stdTdBorderBottom)과 동일한 1px solid ${borderColor} 라 일관됨. 없으면 th 라인 폴백.
+                const _topLine = stdTdBorderBottom || stdThBorderBottom;
+                if (_topLine) tbl.style.borderTop = _topLine;
                 tbl.querySelectorAll('th').forEach(th => {
                     if (stdThBorderBottom) th.style.borderBottom = stdThBorderBottom;
                     if (stdThBg) th.style.backgroundColor = stdThBg;
@@ -753,6 +758,45 @@
                         td.style.borderBottom = stdTdBorderBottom;
                     }
                 });
+                // [2026-06-02] 표 상단 라인은 첫 행 셀(th/td)에 직접 border-top — border-collapse:collapse 에서
+                //   <table> 요소의 border-top 은 첫 행 셀의 border:none 과 충돌해 렌더가 누락되는 경우가 있어,
+                //   첫 행 셀에 직접 박아 확실히 그린다. 위 td 루프의 border:none 이후에 적용해야 덮이지 않음.
+                //   table 의 border-top(위)과 같은 위치라 collapse 로 합쳐짐 → 이중선 없음.
+                if (_topLine) {
+                    const _firstRow = tbl.querySelector('tr');
+                    if (_firstRow) _firstRow.querySelectorAll('th, td').forEach(c => { c.style.borderTop = _topLine; });
+                }
+            });
+
+            // [2026-05-31] 표 위/아래 간격 보장 (콘텐츠 + 팝업 패널 모두). → ensureTableSpacers
+            allAreas.forEach(a => ensureTableSpacers(a));
+        }
+
+        // [2026-05-31 / 2026-06-01] 표(또는 표만 단독으로 감싼 스크롤/콜아웃 래퍼) 위·아래에 16px spacer 보장.
+        //   인접 형제가 실제 콘텐츠면 16px spacer 삽입, 이미 빈 spacer <p> 면 그 높이를 16px 로 정규화.
+        //   [2026-06-01] 사용자 결정 — 표 위·아래 간격 16px 통일 (기존 32px 너무 넓음 / 8px·32px 룰 충돌 해소).
+        //   기존 spacer 도 정규화하는 이유: Gemini 가 옛 8px 또는 32px spacer 를 이미 출력한 경우, 삽입만으론
+        //   안 고쳐짐 → 인접 spacer 높이를 직접 16px 로 맞춰야 실제 간격이 통일됨. 콘텐츠/팝업 패널 양쪽 호출.
+        function ensureTableSpacers(rootEl) {
+            if (!rootEl || !rootEl.querySelectorAll) return;
+            const _isSpacerP = (n) => n && n.nodeType === 1 && n.tagName === 'P'
+                && !(n.textContent || '').trim()
+                && !n.querySelector('img,table,video,iframe,svg,canvas,button,a');
+            const _setH = (p) => p.setAttribute('style', 'height:16px;margin:0;');
+            const _mk = () => { const p = document.createElement('p'); _setH(p); return p; };
+            rootEl.querySelectorAll('table').forEach(tbl => {
+                let unit = tbl;
+                const _p = tbl.parentElement;
+                if (_p && _p.children && _p.children.length === 1 && _p.firstElementChild === tbl) {
+                    const _ps = (_p.getAttribute('style') || '') + ' ' + (_p.className || '');
+                    if (/overflow|tbl-scroll-wrap/i.test(_ps)) unit = _p;
+                }
+                const parent = unit.parentElement;
+                if (!parent) return;
+                const _prev = unit.previousElementSibling;
+                const _next = unit.nextElementSibling;
+                if (_prev) { if (_isSpacerP(_prev)) _setH(_prev); else parent.insertBefore(_mk(), unit); }
+                if (_next) { if (_isSpacerP(_next)) _setH(_next); else parent.insertBefore(_mk(), _next); }
             });
         }
 

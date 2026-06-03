@@ -27,6 +27,62 @@
 // ────────────────────────────────────────────────────────────────
 // ① prepareSheetForCapture (Stage 6 후 L259-394)
 // ────────────────────────────────────────────────────────────────
+        // [2026-06-02] 캡처 클론에서 cross-origin 오염원(비-img) 무력화 (Slicer/JPG 공통).
+        //   정적 캡처라: <video> 는 포스터(data:) img 로 치환(없으면 검정 박스), cross-origin background-image
+        //   는 제거(background-color 보존), SVG <image>/<iframe> 의 외부 리소스는 제거. data:/blob: 은 안전 → 보존.
+        //   진단: 무력화한 항목 수를 [capture-diag] 로 남겨 실제 오염원 확인 가능.
+        function neutralizeTaintingResourcesForCapture(root) {
+            if (!root) return;
+            const _isSafe = (u) => !u || u.startsWith('data:') || u.startsWith('blob:');
+            const diag = { videoToPoster: 0, videoToBox: 0, bgImage: 0, svgImage: 0, iframe: 0, httpImgLeft: 0 };
+            // 1) video 처리 — 정적 캡처라 오염 위험분만 대체:
+            //    ① 안전 포스터(data:/blob:) 있으면 그 poster img 로 치환 (최선의 정적 표현)
+            //    ② 포스터 없고 src 가 cross-origin/상대(http·상대경로) → 검정 박스 (오염·broken 방지)
+            //    ③ 포스터 없고 src 가 data:/blob: (same-origin) → 그대로 둠 (htmlToImage 가 안전하게 렌더)
+            root.querySelectorAll('video').forEach(v => {
+                const poster = (v.getAttribute('poster') || '').trim();
+                const src = (v.getAttribute('src') || v.currentSrc || '').trim();
+                const st = v.getAttribute('style') || '';
+                if (poster && _isSafe(poster)) {
+                    const img = document.createElement('img');
+                    img.setAttribute('src', poster);
+                    img.setAttribute('style', st + ';display:block;max-width:100%;height:auto;');
+                    if (v.parentNode) v.parentNode.replaceChild(img, v);
+                    diag.videoToPoster++;
+                } else if (!_isSafe(src)) {
+                    const box = document.createElement('div');
+                    box.setAttribute('style', st + ';background-color:#000;min-height:1px;');
+                    if (v.parentNode) v.parentNode.replaceChild(box, v);
+                    diag.videoToBox++;
+                }
+                // else: data:/blob: src + 포스터 없음 → 유지 (오염 위험 없음)
+            });
+            // 2) 인라인 cross-origin background-image 제거 (background-color 보존)
+            root.querySelectorAll('*').forEach(el => {
+                if (!el.style) return;
+                const bg = el.style.backgroundImage || '';
+                if (bg && bg !== 'none') {
+                    const m = bg.match(/url\((["']?)([^"')]+)\1\)/i);
+                    if (m && !_isSafe(m[2])) { el.style.backgroundImage = 'none'; diag.bgImage++; }
+                }
+            });
+            // 3) SVG <image> 외부 href 제거
+            root.querySelectorAll('image').forEach(im => {
+                const href = im.getAttribute('href') || im.getAttribute('xlink:href') || '';
+                if (!_isSafe(href)) { im.remove(); diag.svgImage++; }
+            });
+            // 4) iframe 제거 (정적 캡처 불가 + 오염 위험)
+            root.querySelectorAll('iframe').forEach(f => { f.remove(); diag.iframe++; });
+            // 5) 진단용 — sanitize 후에도 남은 http/상대 img (오염 가능성, 정상 경로면 0이어야 함)
+            root.querySelectorAll('img').forEach(im => {
+                const s = (im.getAttribute('src') || '').trim();
+                if (s && !_isSafe(s)) diag.httpImgLeft++;
+            });
+            if (Object.values(diag).some(n => n > 0)) {
+                console.log('[capture-diag] neutralized tainting resources:', diag);
+            }
+        }
+
         // canvas 캡처 전 sheet 준비 (Slicer/JPG 공통)
         async function prepareSheetForCapture() {
             const sheet = getById('documentSheet');
@@ -73,6 +129,11 @@
             //   [defense 2026-05-20] clone 단계에서 2차 sanitize (라이브에서 1차 했어도 cloneNode 후 잔존하는 잘못된 src 제거)
             renderClone.querySelectorAll('img[data-broken-img]').forEach(el => el.remove());
             sanitizeBrokenImages(renderClone, 'clone-post-convert');
+            // [2026-06-02] 비-img cross-origin 오염원 무력화 — htmlToImage 가 cross-origin <video> 프레임 /
+            //   CSS background-image / SVG <image> / <iframe> 를 캔버스에 그리면 canvas 가 tainted 되어
+            //   toDataURL 이 SecurityError("Tainted canvases may not be exported") 로 실패. img 는 위
+            //   convertImagesToBase64+sanitize 로 이미 처리됨 → 남은 오염원은 이들 비-img 요소.
+            neutralizeTaintingResourcesForCapture(renderClone);
 
             // 테이블 border 강화 — htmlToImage foreignObject 렌더링에서 1px border 손실 방지
             // 클론은 #contentArea 밖이므로 CSS 셀렉터(#contentArea td) 미적용 → 인라인으로 모든 border 강제
@@ -619,20 +680,34 @@
             imageFiles.forEach(f => imgFolder.file(f.fileName, f.b64, { base64: true }));
             videoFiles.forEach(f => imgFolder.file(f.fileName, f.b64, { base64: true }));
 
-            function buildHtml(baseUrl) {
+            function buildHtml(baseUrl, keepBase64) {
                 const d = buildCleanDiv();
 
-                d.querySelectorAll('img').forEach(img => {
-                    const src = img.getAttribute('src') || '';
-                    if (imgMap.has(src)) img.setAttribute('src', baseUrl + imgMap.get(src));
-                });
+                // [2026-06-01] keepBase64=true (index_불러오기용.html 전용): 본문 이미지를 상대경로로
+                //   치환하지 않고 base64 원본 그대로 유지. 재불러오기 시 폴더 없이도 본문이 그대로 뜸
+                //   (팝업 se-popup-content 가 base64 라 항상 살던 것과 동일한 자체완결 구조). 회귀 차단:
+                //   기존엔 본문만 ./hashFolder/ 상대경로 → FileReader 불러오기 시 fetch 불가 → 본문 이미지
+                //   전멸. ZIP 의 hashFolder/ 이미지 파일·index_cdn.html(CDN URL) 은 그대로라 배포 영향 없음.
+                if (!keepBase64) {
+                    d.querySelectorAll('img').forEach(img => {
+                        const src = img.getAttribute('src') || '';
+                        if (imgMap.has(src)) img.setAttribute('src', baseUrl + imgMap.get(src));
+                    });
+                } else {
+                    // 본문이 전부 base64 → 상대경로 img 부재로 import 시 detectExistingHash 가 해시 폴더를
+                    //   못 잡음. .se-contents 에 해시를 기록 → 재불러오기 후 재export 때 폴더명 유지 (CDN URL 안정).
+                    const _sc = d.querySelector('.se-contents');
+                    if (_sc) _sc.setAttribute('data-promo-hash', hashFolder);
+                }
                 d.querySelectorAll('video[src]').forEach(vid => {
                     const src = vid.getAttribute('src') || '';
                     if (videoMap.has(src)) vid.setAttribute('src', baseUrl + videoMap.get(src));
                 });
 
                 let heroFinalSrc = '';
-                if (heroFileName) {
+                if (keepBase64 && heroSrc && heroSrc.startsWith('data:image')) {
+                    heroFinalSrc = heroSrc; // 불러오기용 — 히어로도 base64 유지 (폴더 없이 재불러오기)
+                } else if (heroFileName) {
                     heroFinalSrc = baseUrl + heroFileName;
                 } else if (heroSrc && heroSrc !== '' && !heroSrc.endsWith('undefined')) {
                     heroFinalSrc = heroSrc;
@@ -689,7 +764,7 @@
             // ── 불러오기용 + 브라우저 확인용 (index_불러오기용.html) ──
             // 사이냅 호환: se-popup-content (re-import 데이터) + se-popup-overlay (사전 렌더) + 인라인 onclick 토글
             // <script> 없음. createElement 없음.
-            let localHtml = buildHtml(`./${hashFolder}/`);
+            let localHtml = buildHtml(`./${hashFolder}/`, true); // keepBase64: 본문 이미지 base64 자체완결 (재불러오기용)
             localHtml = appendPopupBlocks(localHtml);
             // popup-trigger 버튼 기존 onclick 제거
             localHtml = localHtml.replace(/(<(?:button|a)[^>]*class="popup-trigger"[^>]*)\s+onclick="[^"]*"/gi, '$1');
@@ -748,7 +823,13 @@
             if (cdnUrl) {
                 const cdnBaseUrl = (cdnUrl.endsWith('/') ? cdnUrl : cdnUrl + '/') + hashFolder + '/';
                 let cdnHtml = buildHtml(cdnBaseUrl);
-                if (childPanels.length > 0) cdnHtml = buildInlinePopupHtml(cdnHtml);
+                if (childPanels.length > 0) {
+                    // [2026-06-02] CDN HTML 팝업 인라인 이미지 base64 → CDN URL 치환 맵 (본문 이미지와 동일 규칙).
+                    //   imgMap: base64src → filename (팝업 이미지도 위 childArea 스캔에서 수집됨). cdnBaseUrl+filename 이 CDN URL.
+                    const _cdnPopupImgMap = {};
+                    imgMap.forEach((fn, b64) => { _cdnPopupImgMap[b64] = cdnBaseUrl + fn; });
+                    cdnHtml = buildInlinePopupHtml(cdnHtml, undefined, false, _cdnPopupImgMap);
+                }
                 cdnHtml = convertTabAnchorsForCdn(cdnHtml);
                 cdnHtml = ensureLayoutCompliance(cdnHtml);
                 // se-popup-content DOM 기반 제거 (중첩 div 있어도 안전) — 게시용에는 불필요

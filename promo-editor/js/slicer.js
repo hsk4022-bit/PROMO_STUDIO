@@ -678,6 +678,9 @@
             // ── index_불러오기용.html: HTML 코드 저장과 동일한 구조 (프로모에디터 재불러오기 전용) ──
             // contentArea HTML + 이미지 파일 추출(상대경로) → 에디터 없이 바로 열람 가능
             // HTML 문자열을 반환 (ZIP 저장은 아래 구조 확정 후 수행)
+            // [2026-06-02] 팝업 인라인 이미지 CDN URL 치환용 — generateLocalHtml 의 base64→파일명 맵을 외부로 노출.
+            //   파일명이 랜덤 해시라 재생성 불가 → 같은 맵을 CDN 팝업 빌드(L960)에서 재사용해야 함.
+            const _contentImgMap = new Map();
             const localHtmlResult = (function generateLocalHtml() {
                 const _ca = getById('contentArea');
                 const _hi = getById('mainHeroImg');
@@ -728,7 +731,7 @@
                 })(_d);
 
                 // 2) 이미지 스캔 → contentImgRegistry에 수집 (PROMO_html/hashFolder/ 전용)
-                const _imgMap = new Map();
+                const _imgMap = _contentImgMap; // 외부 노출 (CDN 팝업 이미지 치환에 재사용)
                 let _imgIdx = 1;
                 _d.querySelectorAll('img').forEach(img => {
                     const src = img.getAttribute('src') || '';
@@ -957,7 +960,12 @@
                         new RegExp('\\.\\/'+_escapedHash2+'\\/', 'g'), contentCdnUrl
                     );
                     // 게시용: onclick 추가 + se-popup-content 제거
-                    if (childPanels.length > 0) contentCdnHtml = buildInlinePopupHtml(contentCdnHtml);
+                    if (childPanels.length > 0) {
+                        // [2026-06-02] 팝업 인라인 base64 이미지 → CDN URL 치환 (본문 이미지와 동일). 미전달 시 base64 유지.
+                        const _cdnPopupImgMap = {};
+                        _contentImgMap.forEach((fn, b64) => { _cdnPopupImgMap[b64] = contentCdnUrl + fn; });
+                        contentCdnHtml = buildInlinePopupHtml(contentCdnHtml, undefined, false, _cdnPopupImgMap);
+                    }
                     contentCdnHtml = convertTabAnchorsForCdn(contentCdnHtml);
                     contentCdnHtml = ensureLayoutCompliance(contentCdnHtml);
                     // se-popup-content DOM 기반 제거 (중첩 div 있어도 안전)

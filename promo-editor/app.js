@@ -6,7 +6,7 @@
         function loadHtmlFile(htmlFile, imgMap) {
             imgMap = imgMap || {};
             const reader = new FileReader();
-            reader.onload = (ev) => {
+            reader.onload = async (ev) => {
                 recordState();
                 // BOM(U+FEFF) 제거 + 인코딩 보정
                 let rawHtml = ev.target.result || '';
@@ -105,23 +105,32 @@
                 // [2026-05-31] http/CDN URL 에서도 hashFolder 감지 (파일명 바로 앞 경로 세그먼트).
                 //   CDN-URL HTML 을 불러올 때 currentHashFolder 를 못 잡으면, export 의 불러오기용 상대경로화·
                 //   index_cdn 파생치환(./hashFolder/→cdn)이 어긋남 → 불러오기용에 절대 CDN URL 이 남는 회귀 방지.
-                const allImgs = doc.querySelectorAll('img[src]');
-                for (const img of allImgs) {
-                    const src = img.getAttribute('src') || '';
-                    if (src.startsWith('data:') || src.startsWith('blob:')) continue;
-                    let candidate;
-                    if (src.startsWith('http')) {
-                        const segs = src.split('?')[0].split('#')[0].split('/').filter(Boolean);
-                        candidate = segs.length >= 2 ? segs[segs.length - 2] : '';
-                    } else {
-                        const parts = src.split('/');
-                        // ./hashFolder/file → parts[0]='.' parts[1]='hashFolder'
-                        // hashFolder/file   → parts[0]='hashFolder'
-                        candidate = (parts[0] === '.' || parts[0] === '') ? parts[1] : parts[0];
-                    }
-                    if (candidate && candidate.length >= 8 && /^[a-z0-9]+$/i.test(candidate)) {
-                        currentHashFolder = candidate;
-                        break;
+                // [2026-06-01] 본문 base64 자체완결(불러오기용)은 상대경로 img 가 없어 아래 img-scan 으로
+                //   해시 폴더를 못 잡음. export 가 .se-contents 에 박아둔 data-promo-hash 를 우선 사용 →
+                //   재불러오기 후 재export 시 폴더명 유지 (안 그러면 새 해시 생성 → CDN 폴더 URL 변동).
+                const _hashEl = doc.querySelector('.se-contents[data-promo-hash]');
+                const _hashFromAttr = _hashEl ? (_hashEl.getAttribute('data-promo-hash') || '') : '';
+                if (_hashFromAttr) {
+                    currentHashFolder = _hashFromAttr;
+                } else {
+                    const allImgs = doc.querySelectorAll('img[src]');
+                    for (const img of allImgs) {
+                        const src = img.getAttribute('src') || '';
+                        if (src.startsWith('data:') || src.startsWith('blob:')) continue;
+                        let candidate;
+                        if (src.startsWith('http')) {
+                            const segs = src.split('?')[0].split('#')[0].split('/').filter(Boolean);
+                            candidate = segs.length >= 2 ? segs[segs.length - 2] : '';
+                        } else {
+                            const parts = src.split('/');
+                            // ./hashFolder/file → parts[0]='.' parts[1]='hashFolder'
+                            // hashFolder/file   → parts[0]='hashFolder'
+                            candidate = (parts[0] === '.' || parts[0] === '') ? parts[1] : parts[0];
+                        }
+                        if (candidate && candidate.length >= 8 && /^[a-z0-9]+$/i.test(candidate)) {
+                            currentHashFolder = candidate;
+                            break;
+                        }
                     }
                 }
 
@@ -159,6 +168,21 @@
                     if (m && parseInt(m[0]) >= nextPopupId) nextPopupId = parseInt(m[0]) + 1;
                     addChildPanel(id, null);
                 });
+
+                // [2026-05-31] 불러오기 시 fetch 가능한 이미지(동일 출처 상대경로 / 접근 가능 URL)를 base64 로 임베드.
+                //   → 위치 의존 없이 화면에 뜨고, 그대로 baked 되어 폴더 없이도 유지·export. (팝업 base64 와 동일한 형태)
+                //   제약: 브라우저가 읽을 수 있는 것만 변환 — 403/미배치 상대경로는 data-broken-img 마커만(기존과 동일).
+                //   (이전 "재매칭 base64" 결정 반영 — 그때 export 수정으로 빠졌던 부분.)
+                if (typeof convertImagesToBase64 === 'function') {
+                    try { await convertImagesToBase64(getById('contentArea')); } catch(e) { console.warn('[import] base64 embed err:', e); }
+                    // 히어로 + 팝업 패널 이미지도 동일 처리
+                    const _hi = getById('mainHeroImg');
+                    if (_hi && _hi.getAttribute('src') && !_hi.getAttribute('src').startsWith('data:')) {
+                        const _hw = document.createElement('div'); _hw.appendChild(_hi.cloneNode(true));
+                        try { await convertImagesToBase64(_hw); const _b = _hw.querySelector('img')?.getAttribute('src'); if (_b && _b.startsWith('data:')) applyHeroImage(_b, false, null, true); } catch(_) {}
+                    }
+                    for (const _p of childPanels) { const _ca = getById('childArea_' + _p.id); if (_ca) { try { await convertImagesToBase64(_ca); } catch(_) {} } }
+                }
 
                 // 이미지 재매칭 — 에셋 라이브러리에 파일이 있으면 자동으로 마커 교체
                 if (Object.keys(contentAssetLibrary).length > 0) {
@@ -267,6 +291,85 @@
         // 예: "img.png"  →  "(img.png)"  — AI가 이미지 마커로 인식하고 runImageMatching이 자산 매칭 가능
         // 이미 괄호/대괄호로 감싸진 경우는 건드리지 않음
 
+        // [2026-06-01] 결정론적 버튼 배치 — [[대버튼]]/[[중버튼]]/[[소버튼]] (대괄호 2쌍) 은
+        //   섹션 카드 "외부" 독립 배치가 의도 (rules/12-button.md). 기존엔 이 배치를 Gemini 프롬프트
+        //   룰(app.js:679)에만 의존 → 마커가 섹션 본문 안에 적혀 있으면 Gemini 가 문서 흐름대로
+        //   버튼을 섹션 카드 "안"에 박는 회귀 발생 (마커 의미 < 문서 위치). 영상/표가 preserve-token+
+        //   결정론적 후처리로 Gemini 의존을 끊은 것과 동일하게, 여기서도 배치를 결정론적으로 강제.
+        //   원고(sourceText)에서 [[...]] 마커의 라벨을 추출 → 생성된 HTML 에서 같은 라벨의 버튼이
+        //   섹션 카드 안에 있으면 그 카드 "바로 뒤 형제"로 hoist (= 섹션 사이/콘텐츠 끝 독립 블록).
+        //   wrapVideoGridsInCallout/recoverMissingVideoUrls 와 동일한 "소스 기반 결정론적 후처리" 패턴.
+        //   idempotent — 이미 섹션 밖이면 no-op. 단일 대괄호 [버튼] 은 건드리지 않음.
+        function hoistStandaloneButtonsOutOfCards(out, sourceText) {
+            if (!out || !sourceText || out.indexOf('<') === -1) return out;
+            let m;
+            // 이중 대괄호 마커 + 같은 줄 라벨 텍스트 수집 → 섹션 밖 배치 대상
+            const standalone = new Set();
+            const dblRe = /\[\[(?:대|중|소)버튼\]\]\s*([^\n<\[]+)/g;
+            while ((m = dblRe.exec(sourceText)) !== null) {
+                const label = m[1].trim();
+                if (label) standalone.add(label);
+            }
+            if (!standalone.size) return out;
+            // 단일 대괄호 라벨 — 이중 마커(+라벨)를 먼저 제거한 뒤 매칭 (lookbehind 회피).
+            //   같은 라벨이 [버튼] 과 [[버튼]] 양쪽에 쓰이면 모호 → 건드리지 않음.
+            const single = new Set();
+            const srcSingle = sourceText.replace(/\[\[(?:대|중|소)버튼\]\]\s*[^\n<\[]+/g, '');
+            const sglRe = /\[(?:대|중|소)버튼\]\s*([^\n<\[]+)/g;
+            while ((m = sglRe.exec(srcSingle)) !== null) {
+                const label = m[1].trim();
+                if (label) single.add(label);
+            }
+
+            const _tmp = document.createElement('div');
+            _tmp.innerHTML = out;
+            const _isSectionCard = (el) => {
+                if (!el || !el.classList || !el.classList.contains('se-div')) return false;
+                const s = el.style;
+                if (!s.backgroundColor || s.backgroundColor === 'transparent' || s.backgroundColor === 'inherit') return false;
+                if (s.maxWidth) return false; // 콘텐츠 래퍼 제외
+                return true;
+            };
+
+            let _hoisted = 0, _ambiguous = 0;
+            _tmp.querySelectorAll('a, button').forEach(btn => {
+                if (btn.getAttribute('data-popup') || (btn.className || '').includes('popup-trigger')) return;
+                const label = (btn.textContent || '').trim();
+                if (!standalone.has(label)) return;
+                if (single.has(label)) { _ambiguous++; return; }
+
+                // 가장 가까운 조상 섹션 카드 탐색
+                let card = btn.parentElement;
+                while (card && card !== _tmp && !_isSectionCard(card)) card = card.parentElement;
+                if (!card || !_isSectionCard(card)) return; // 이미 섹션 밖 → idempotent skip
+
+                // 이동 단위: text-align:center se-div 래퍼의 단일 자식이면 그 래퍼째, 아니면 새 래퍼로 감쌈
+                let unit;
+                const p = btn.parentElement;
+                if (p && p !== card && p.classList && p.classList.contains('se-div') &&
+                    /text-align\s*:\s*center/i.test(p.getAttribute('style') || '') &&
+                    p.children.length === 1) {
+                    unit = p;
+                } else {
+                    unit = document.createElement('div');
+                    unit.className = 'se-div';
+                    unit.setAttribute('style', 'padding:0px 0px 0px 0px;margin:0;text-align:center;');
+                    btn.parentNode.insertBefore(unit, btn);
+                    unit.appendChild(btn);
+                }
+                // 카드 바로 뒤 형제로 이동 (섹션 사이 / 콘텐츠 끝 독립 블록). nextSibling=null 이면 끝에 append.
+                card.parentNode.insertBefore(unit, card.nextSibling);
+                _hoisted++;
+            });
+
+            if (_hoisted || _ambiguous) {
+                console.warn('[button-hoist] [[버튼]] hoisted out of section card:', _hoisted,
+                    '/ ambiguous label (used by both [.] and [[.]], skipped):', _ambiguous);
+                out = _tmp.innerHTML;
+            }
+            return out;
+        }
+
         async function generateContent() {
             // [2026-05-27] paste 경로 전처리 — 연속 영상 마커 → 결정론적 그리드 변환.
             //   노션 INGESTION 경로는 build_notion_data.py 가 이미 변환했으므로 마커 사라짐 → no-op.
@@ -373,7 +476,14 @@
                 textColor   = _pal.text;
                 subColor    = _pal.sub;
                 const surfaceColor = _pal.surface;
-                const borderColor  = _pal.border;
+                // [2026-06-02] 라인 톤다운 — borderColor 를 흰색 쪽으로 블렌딩해 더 밝게 (사용자 요청).
+                //   위지윅(축소 표시→슬라이스 저장)과 다운로드 HTML(100% 렌더)이 같은 borderColor 를 쓰므로
+                //   둘 다 동일하게 연해져 결과물이 어긋나지 않음. 밝기 정도는 _LINE_LIGHTEN 으로 조절(0=원본,1=흰색).
+                //   영향: 표 행 구분선·표 상단 라인 + borderColor 쓰는 구분선(패턴 B 풀폭 border-top, 리스트 구분선) 공통.
+                const _LINE_LIGHTEN = 0.4;
+                const borderColor  = (typeof blendHex === 'function' && /^#[0-9a-fA-F]{6}$/.test(_pal.border || ''))
+                    ? blendHex(_pal.border, '#ffffff', _LINE_LIGHTEN)
+                    : _pal.border;
                 const thBgColor    = _pal.thBg;
                 const mutedColor   = _pal.muted;
                 // UI picker 동기화 — 사용자가 최종 결정된 색을 시각적으로 확인 가능
@@ -641,14 +751,14 @@
 - <tbody>에는 데이터 행만 포함. 빈 행 절대 금지.
 - 표 데이터는 반드시 <table>. div 대체 절대 금지.
 - 테이블은 섹션 se-div 안에 직접 배치. **별도 래퍼 div 추가 금지.**
-- table: style="width:100%;border-collapse:collapse;table-layout:fixed;margin:0;"
+- table: style="width:100%;border-collapse:collapse;table-layout:fixed;margin:0;border-top:1px solid ${borderColor};"
 - th: style="padding:1rem 1rem;border:none;border-bottom:1px solid ${borderColor};font-weight:800;color:${textColor};text-align:center;background-color:${thBgColor};word-break:keep-all;overflow-wrap:break-word;vertical-align:middle;line-height:1.4;box-sizing:border-box;min-width:2.5rem;font-size:inherit;"
 - td: style="padding:1rem 1rem;border:none;border-bottom:1px solid ${borderColor};color:${subColor};text-align:center;vertical-align:middle;word-break:keep-all;overflow-wrap:break-word;line-height:1.4;box-sizing:border-box;min-width:2.5rem;font-size:inherit;background-color:transparent;"
-- ⚠️ **세로 보더(border-left/right) 절대 금지.** 가로 라인(border-bottom) 만 사용. 마지막 데이터 행은 border-bottom:none.
+- ⚠️ **세로 보더(border-left/right) 절대 금지.** 행 구분은 셀의 border-bottom 만. 마지막 데이터 행은 border-bottom:none.
 - ⚠️ 헤더 굵은 강조선(border-bottom:2px solid accentColor) 절대 금지 — 헤더 bg(thBgColor)가 이미 강조 역할. 굵은 선 추가 시 즉시 FAIL.
-- **⚠️ 세로줄(좌우 border) 금지.** 테이블은 오직 가로 라인(border-top/border-bottom)만으로 행 구분. td/th 에 border-left/right 추가하면 즉시 FAIL.
+- **⚠️ 세로줄(좌우 border) 금지.** td/th 에 border-left/right 추가하면 즉시 FAIL. 표 상단 라인은 \`<table>\` 의 border-top 1개로만 (셀에 border-top 박지 말 것 — 행마다 이중선).
 - **⚠️ \`<tr>\` 에 인라인 style 금지** — background-color 나 border 를 \`<tr>\` 에 넣지 말 것. 색/선은 \`<th>\` / \`<td>\` 에만. \`<tr>\` 에 넣으면 렌더러별로 이중선/얼룩 발생 → FAIL.
-- ⚠️ thead 없는 테이블도 첫 행에 border-top 추가 금지 — 외곽 라인 없음 정책 (헤더 bg 가 가시성 담당).
+- ⚠️ 표 상단 라인은 \`<table>\` 에 \`border-top:1px solid ${borderColor}\` 1개 (행 구분선과 동일 색·두께). thead 유무 무관. 셀(th/td)에는 border-top 금지.
 - ⚠️ 테이블 자손 텍스트 요소 인라인 color 필수 (상속 신뢰 금지): th 안 자손은 color:${textColor} (헤더 crisp), td 안 자손은 color:${subColor} (본문 dim — 위계 분리). 생략 시 다운로드 HTML 단독 뷰에서 검정으로 떨어져 안 보이는 사고 발생 → 즉시 FAIL.
 - 짝수 행 배경색 구분(스트라이프) 절대 금지. tbody td 는 모두 \`background-color:transparent\` 통일.
 - 모든 th·td에 width% 명시. colspan/rowspan 적극 활용.
@@ -1148,6 +1258,10 @@ ${injectedGuideline}`;
 
                 // event-video div → 정적 <video> 태그 치환 (2026-05-20: 스크립트 방식 폐기). → js/video.js
                 out = ensureEventVideoScript(out);
+
+                // [2026-06-01] 결정론적 버튼 배치 — 원고의 [[버튼]] (2쌍) 라벨을 가진 버튼이 섹션 카드
+                //   안에 잘못 박힌 경우 카드 밖(직후 형제)으로 hoist. Gemini 의 배치 불준수 회귀 차단.
+                out = hoistStandaloneButtonsOutOfCards(out, data);
 
                 const notice = getById('initialNotice'); if (notice) notice.remove();
                 // 에디터용: popup-trigger 의 onclick 은 항상 제거 (export 시점에 새로 생성됨)

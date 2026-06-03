@@ -104,6 +104,9 @@
 
             // 팝업 내 테이블 th → td 정규화 (fixTableThs 적용)
             if (typeof fixTableThs === 'function') fixTableThs(childArea);
+            // [2026-05-31] 팝업 표 위/아래 간격 보장 (본문과 동일) — standardizeTableStyles 는 패널 생성 전에 돌아
+            //   팝업 표를 못 잡으므로 여기서 직접 호출.
+            if (typeof ensureTableSpacers === 'function') ensureTableSpacers(childArea);
 
             setTimeout(() => sheet.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 100);
 
@@ -482,6 +485,7 @@
                                 console.log('[popup-flow] UPDATING existing panel:', id);
                                 area.innerHTML = content;
                                 if (typeof fixTableThs === 'function') fixTableThs(area);
+                                if (typeof ensureTableSpacers === 'function') ensureTableSpacers(area);
                             } else {
                                 console.warn('[popup-flow] panel in childPanels but childArea_' + id + ' DOM missing!');
                             }
@@ -680,7 +684,7 @@
         // 자식 패널 HTML → 인라인 onclick 팝업으로 변환 (사이냅에디터 호환)
         // 사이냅에디터는 <script> 블록을 strip하므로 반드시 onclick 인라인 방식 사용
         // 팝업 콘텐츠는 se-popup-content div에서 읽지 않고 onclick에 직접 인코딩
-        function buildInlinePopupHtml(exportHtml, popupImagePaths, forPreview) {
+        function buildInlinePopupHtml(exportHtml, popupImagePaths, forPreview, imgSrcMap) {
             if (!childPanels.length) return exportHtml;
             popupImagePaths = popupImagePaths || {};
             // accentPicker가 기본값(#888888)일 경우 생성된 HTML에서 accent 색상 직접 추출
@@ -729,6 +733,15 @@
                         const txt = (el.textContent || '').trim();
                         if (['×', '✕', '✗', 'X', '닫기', 'Close', 'CLOSE'].includes(txt)) el.remove();
                     });
+                    // [2026-06-02] CDN export — 팝업 내부 인라인 base64 이미지를 CDN URL 로 치환 (본문 이미지와 동일).
+                    //   imgSrcMap: { base64src → cdnBaseUrl+filename } (export.js 가 imgMap 기반으로 전달).
+                    //   미전달(불러오기용/프리뷰)이면 base64 유지 = 자체완결. 팝업 이미지도 imgMap 에 수집·폴더 저장되므로 URL 유효.
+                    if (imgSrcMap) {
+                        clone.querySelectorAll('img').forEach(im => {
+                            const s = im.getAttribute('src') || '';
+                            if (s && imgSrcMap[s]) im.setAttribute('src', imgSrcMap[s]);
+                        });
+                    }
                     contentInner = clone.innerHTML.trim();
                 }
                 if (!contentInner) return;
@@ -910,6 +923,29 @@
                         }
                         if (absorbed > 0) {
                             console.warn('[popup sanitize] absorbed', absorbed, 'orphan block(s) into popup', pid);
+                        }
+                    }
+                } else {
+                    // [2026-05-31] 인라인 콘텐츠 없는 "깨끗한 트리거" — 내용이 onclick(box.innerHTML)에만 있는 경우.
+                    //   se-popup-content 가 없으면 onclick 에서 추출해 생성한다. (Gemini 가 룰대로 onclick 형으로만
+                    //   출력하면 패널이 비던 회귀 → 생성 패널 / export se-popup-content / 재import 전 구간 동일 원인.)
+                    if (!root.querySelector(`.se-popup-content[data-popup="${pid}"]`)) {
+                        const _oc = btn.getAttribute('onclick') || '';
+                        // getAttribute 는 HTML 엔티티(&lt; &quot; &amp;)를 이미 디코드 → 실제 HTML. JS 문자열 이스케이프만 처리.
+                        const _m = _oc.match(/box\.innerHTML\s*=\s*'([\s\S]*?)'\s*;\s*var\s+cb\s*=/);
+                        if (_m && _m[1]) {
+                            const _c = _m[1]
+                                .replace(/\\u([0-9a-fA-F]{4})/g, (s, h) => String.fromCharCode(parseInt(h, 16)))
+                                .replace(/\\(['"\\])/g, '$1');
+                            if (_c.replace(/<[^>]*>/g, '').trim()) {
+                                const _block = document.createElement('div');
+                                _block.className = 'se-div se-popup-content';
+                                _block.setAttribute('data-popup', pid);
+                                _block.setAttribute('style', 'display:none;overflow:hidden;width:0;height:0;margin:0;padding:0;border:none;');
+                                _block.innerHTML = _c;
+                                (root.querySelector('.se-contents') || root).appendChild(_block);
+                                console.warn('[popup sanitize] content recovered from onclick for', pid);
+                            }
                         }
                     }
                 }
