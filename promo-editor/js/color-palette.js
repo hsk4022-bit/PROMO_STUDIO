@@ -16,24 +16,14 @@
         const POPUP_BTN_STYLE = 'display:inline-flex;align-items:center;justify-content:center;width:1.375rem;height:1.375rem;border-radius:50%;background-color:var(--popup-btn-color,#7c3aed);color:#ffffff;font-size:0.75rem;font-weight:900;border:none;cursor:pointer;vertical-align:middle;margin:0 0.25rem;line-height:1;';
         function getPopupBtnStyle() {
             const ac = getById('accentPicker')?.value;
-            // accent가 없거나 기본값이면 DOM에서 가장 자주 쓰인 포인트 색 추출 시도
+            // accent가 없거나 기본값이면 DOM에서 포인트 색 추출 시도
+            //   [SSOT 2026-06-04] 자체 빈도 추출(게이트 없음) → detectAccentFromDom 으로 통일.
+            //   bg hue-family 게이트가 적용돼 off-family(주황 로고) 가 팝업 버튼색으로 새지 않음.
             let color = (ac && ac !== '#888888') ? ac : null;
             if (!color) {
                 const area = getById('contentArea');
-                if (area) {
-                    const freq = {};
-                    area.querySelectorAll('[style*="color"]').forEach(el => {
-                        const m = el.getAttribute('style').match(/(?<![a-z-])color\s*:\s*(#[0-9a-fA-F]{6})/g);
-                        if (m) m.forEach(match => {
-                            const hex = match.replace(/.*:\s*/, '').toLowerCase();
-                            if (hex !== '#ffffff' && hex !== '#000000' && hex !== '#1e293b' && hex !== '#2d2d2d') {
-                                freq[hex] = (freq[hex] || 0) + 1;
-                            }
-                        });
-                    });
-                    const top = Object.entries(freq).sort((a,b) => b[1]-a[1])[0];
-                    if (top) color = top[0];
-                }
+                const bg = getById('bgPicker')?.value || '';
+                color = detectAccentFromDom(area, bg, {});
             }
             if (!color) color = getById('bgPicker')?.dataset?.accent || '#888888';
             const _btnTextColor = isDarkColor(color) ? '#ffffff' : '#000000';
@@ -98,9 +88,64 @@
             return Math.abs(ar-br)+Math.abs(ag-bg_)+Math.abs(ab-bb);
         }
         //   중성색(저채도/거의 흰색/거의 검정) 판별: accent 후보에서 제외.
+        //   ⚠️ [2026-06-04 핵심버그fix] 흰색 판정은 `min>230`(전 채널 높음) 이어야 함.
+        //     기존 `max>230` 은 R=255 인 vivid 빨강/주황(#ff4d4d/#ff9a00)을 "거의 흰색"으로 오판 →
+        //     모든 hue-family 게이트·강제 치환이 가장 선명한 255짜리 warm 색(로고/축제색)을 통째로 흘려보냄.
+        //     이게 accent 가 계속 주황/빨강으로 새던 진짜 근본 원인. (near-white=min>230, vivid=low min)
         function isNeutralColor(c) {
             const r=parseInt(c.slice(1,3),16), g=parseInt(c.slice(3,5),16), b=parseInt(c.slice(5,7),16);
-            return (Math.max(r,g,b)-Math.min(r,g,b)) < 30 || Math.max(r,g,b) > 230 || (r<25&&g<25&&b<25);
+            return (Math.max(r,g,b)-Math.min(r,g,b)) < 30 || Math.min(r,g,b) > 230 || (r<25&&g<25&&b<25);
+        }
+
+        // ── accent 선택 SSOT (2026-06-04) ────────────────────────────────────
+        //   회귀: 파란 히어로인데 본문/이미지 안 주황 로고가 accent 로 굳음(#ff9a00).
+        //   원인: accent SET 지점 4곳 중 hue-family 게이트가 픽셀 추출 1곳에만 있었음.
+        //     본문 DOM 최빈색 재감지(loadHtmlFile / syncAccentPicker)가 게이트 없이 덮어써
+        //     bg(파랑) 와 이질적인 주황을 선택 → 자기강화 루프.
+        //   해결: hue-family 게이트를 이 단일 함수로 통합. off-family(bgHue ±90° 밖) 하드 제외.
+        //
+        //   pickAccentFromCandidates: [{hex, weight}] 후보 → bg hue family 게이트 → 최고 1개.
+        //     반환 null = "같은 계열 후보 없음"(호출자가 폴백 결정).
+        //     image-editor.js 픽셀 추출(weight=픽셀빈도) 과 본문 DOM(weight=색빈도) 양쪽이 공용.
+        function pickAccentFromCandidates(candidates, bgHex) {
+            if (!candidates || !candidates.length || !/^#[0-9a-fA-F]{6}$/.test(bgHex || '')) return null;
+            const [bgH, bgS] = hexToHsl(bgHex);
+            const reliable = bgS >= 0.12;            // bg 채도 낮으면 hue 불안정 → 게이트 스킵
+            let best = null, bestScore = 0;
+            for (const { hex, weight } of candidates) {
+                if (!/^#[0-9a-fA-F]{6}$/.test(hex || '')) continue;
+                const [h, s] = hexToHsl(hex);
+                let mult = 1.0;
+                if (reliable) {
+                    let d = Math.abs(h - bgH); if (d > 180) d = 360 - d;
+                    mult = d > 90 ? 0 : d > 45 ? 0.3 : 1.0;   // off-family 하드 제외(0)
+                }
+                const score = s * weight * mult;
+                if (score > bestScore) { bestScore = score; best = hex; }
+            }
+            return best;
+        }
+
+        //   detectAccentFromDom: 본문 area 의 inline color hex 빈도 → pickAccentFromCandidates → 폴백.
+        //     반환 null = "덮어쓰지 말 것"(기존 accentPicker 유지 — off-family 굳힘 방지 핵심).
+        //     opts.fallbackAccent: 기존 accentPicker 값(있으면 유지, 없을 때만 bg-hue 생성).
+        function detectAccentFromDom(area, bgHex, opts = {}) {
+            if (!area || !/^#[0-9a-fA-F]{6}$/.test(bgHex || '')) return null;
+            const bg = bgHex.toLowerCase();
+            const freq = {};
+            area.querySelectorAll('[style]').forEach(el => {
+                const m = el.getAttribute('style').match(/#[0-9a-fA-F]{6}/g);
+                if (m) m.forEach(c => { const k = c.toLowerCase(); freq[k] = (freq[k] || 0) + 1; });
+            });
+            const cands = Object.entries(freq)
+                .filter(([c]) => c !== bg && colorDistance(c, bg) > 60 && !isNeutralColor(c))
+                .map(([hex, weight]) => ({ hex, weight }));
+            const picked = pickAccentFromCandidates(cands, bg);
+            if (picked) return picked;
+            // 폴백: 기존 accent 유지(null), 없거나 기본값일 때만 bg-hue 생성
+            const prev = opts.fallbackAccent;
+            if (prev && /^#[0-9a-fA-F]{6}$/.test(prev) && prev !== '#888888') return null;
+            return generatePalette(bgHex).accent;
         }
 
         // rgba() 없이 배경색 + 오버레이를 alpha 블렌딩해 6자리 hex 반환
@@ -134,10 +179,13 @@
         function generatePalette(bgHex) {
             const [bh, bs, bl] = hexToHsl(bgHex);
             const dark = bl < 0.5;
-            // accent: 분할보색 (+150°), 채도 0.45~0.65 (세련된 톤, 원색 방지)
-            const accentH = (bh + 150) % 360;
-            const accentS = Math.min(0.65, Math.max(0.45, bs > 0.3 ? bs * 0.7 : 0.5));
-            const accentL = dark ? Math.min(0.7, Math.max(0.55, 0.62)) : Math.min(0.5, Math.max(0.35, 0.42));
+            // [2026-06-02] accent: 히어로/배경과 **같은 색 계열(동일 hue)** — 대비는 채도·명도로 (POP).
+            //   기존 분할보색(+150°)은 파란 히어로 → 주황 accent 처럼 색 계열이 어긋나는 회귀 원인(사용자 지적).
+            //   디자인 시스템 룰(06: "accent = bg/히어로와 같은 temperature family, 활기는 채도로")과도 일치.
+            //   ※ app.js clampAccentSat 이 채도만 0.45~0.70 으로 제한(hue 보존) → 파란 hue 유지됨.
+            const accentH = bh;  // 동일 hue (같은 계열)
+            const accentS = Math.min(0.78, Math.max(0.55, bs > 0.25 ? bs * 1.15 : 0.6));  // 채도 부스트로 대비
+            const accentL = dark ? Math.min(0.66, Math.max(0.52, 0.6)) : Math.min(0.5, Math.max(0.38, 0.44));
             const accent = hslToHex(accentH, accentS, accentL);
             const surface = blendHex(bgHex, dark ? '#ffffff' : '#000000', 0.08);
             const border = blendHex(bgHex, dark ? '#ffffff' : '#000000', 0.15);
@@ -281,7 +329,10 @@ DESIGN INTENT:
             //   현재 (S 0.30~0.55) → 자신 있는 warm/cool pastel → 깨끗하면서 활기 있음.
             //   고명도(L 0.93+) + 고채도 조합은 "muddy zone(L 0.40~0.80 + S<0.30)" 과 완전히 다른 영역.
             if (isDark) {
-                const _surface  = hslToHex(bgH, clamp(bgS, 0.22, 0.50), 0.25);
+                // [2026-06-04] surface 채도 상향 — 카드 프레임이 탁한 회색빛으로 빠지지 않고 확실한 cool 톤.
+                //   bg 채도 × 1.2 부스트(0.58~0.85). 회색 안 쓰는 디자인이라 bg 보다도 살짝 더 진하게.
+                //   ※ 팝업 박스/카드도 같은 surface(dataset.surface)를 써서 동일하게 적용됨.
+                const _surface  = hslToHex(bgH, clamp(bgS * 1.2, 0.58, 0.85), 0.25);
                 const _thBgFull = hslToHex(acH, clamp(acS * 0.80, 0.40, 0.70), 0.32);
                 // 헤더 bg: 풀 톤을 surface 위 alpha 0.5 로 얹은 효과 (50% opacity)
                 const _thBg     = blendHex(_surface, _thBgFull, 0.5);

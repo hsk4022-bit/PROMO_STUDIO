@@ -35,13 +35,16 @@
             if (!root) return;
             const _isSafe = (u) => !u || u.startsWith('data:') || u.startsWith('blob:');
             const diag = { videoToPoster: 0, videoToBox: 0, bgImage: 0, svgImage: 0, iframe: 0, httpImgLeft: 0 };
-            // 1) video 처리 — 정적 캡처라 오염 위험분만 대체:
+            // 1) video 처리 — 정적 캡처라 모든 live <video> 를 정적 요소로 치환:
             //    ① 안전 포스터(data:/blob:) 있으면 그 poster img 로 치환 (최선의 정적 표현)
-            //    ② 포스터 없고 src 가 cross-origin/상대(http·상대경로) → 검정 박스 (오염·broken 방지)
-            //    ③ 포스터 없고 src 가 data:/blob: (same-origin) → 그대로 둠 (htmlToImage 가 안전하게 렌더)
+            //    ② 그 외 전부 box 로 치환 (오염·broken 방지)
+            //   ⚠️ [2026-06-04 fix] 기존엔 "src 가 data:/blob: 면 유지" 했으나 — event-video 는 URL 이
+            //     `<video>` 가 아니라 `<source src>` 자식에 있어 v.getAttribute('src')/currentSrc 로는 빈 값
+            //     (클론 + preload=metadata 라 currentSrc 미설정). 그래서 src-safety 판정이 cross-origin 비디오를
+            //     "안전"으로 오판해 살려둠 → htmlToImage 가 그 프레임을 그려 canvas tainted → 슬라이스 전체 실패.
+            //     정적 캡처는 어차피 video 표시 불가 → poster 없으면 무조건 box (src 판정 제거).
             root.querySelectorAll('video').forEach(v => {
                 const poster = (v.getAttribute('poster') || '').trim();
-                const src = (v.getAttribute('src') || v.currentSrc || '').trim();
                 const st = v.getAttribute('style') || '';
                 if (poster && _isSafe(poster)) {
                     const img = document.createElement('img');
@@ -49,13 +52,14 @@
                     img.setAttribute('style', st + ';display:block;max-width:100%;height:auto;');
                     if (v.parentNode) v.parentNode.replaceChild(img, v);
                     diag.videoToPoster++;
-                } else if (!_isSafe(src)) {
+                } else {
                     const box = document.createElement('div');
-                    box.setAttribute('style', st + ';background-color:#000;min-height:1px;');
+                    // 레이아웃 유지: 원본 video 의 렌더 높이를 box 최소 높이로 보존 (0 붕괴 방지)
+                    const h = v.offsetHeight || v.clientHeight || 0;
+                    box.setAttribute('style', st + ';background-color:#000;' + (h ? 'min-height:' + h + 'px;' : 'min-height:1px;'));
                     if (v.parentNode) v.parentNode.replaceChild(box, v);
                     diag.videoToBox++;
                 }
-                // else: data:/blob: src + 포스터 없음 → 유지 (오염 위험 없음)
             });
             // 2) 인라인 cross-origin background-image 제거 (background-color 보존)
             root.querySelectorAll('*').forEach(el => {

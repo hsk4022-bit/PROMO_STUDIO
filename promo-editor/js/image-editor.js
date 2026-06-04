@@ -502,48 +502,23 @@
                 }
 
                 // ── 4단계: AC 결정 ──
-                const bgR2 = parseInt(bgColor.slice(1,3), 16);
-                const bgG2 = parseInt(bgColor.slice(3,5), 16);
-                const bgB2 = parseInt(bgColor.slice(5,7), 16);
-                const [bgHue] = rgbToHsl(bgR2, bgG2, bgB2);
-
-                let accentColor = null;
-                let bestScore = 0;
+                // [SSOT 2026-06-04] accent = bg/히어로와 **같은 색 계열** (파란 히어로→파란 accent).
+                //   hue-family 게이트는 color-palette.js 의 pickAccentFromCandidates 단일 함수로 통합
+                //   (본문 DOM 재감지 경로와 동일 로직 — off-family 주황 로고가 어느 경로에서도 못 뽑히게).
+                //   acFreq 후보는 이미 채도 높은 mid-tone 만이라 bg(어두운/옅은)와 채도·명도로 자연 구분됨.
                 const acEntries = Object.entries(acFreq).sort((a, b) => b[1] - a[1]);
-                const topAcCount = acEntries.length > 0 ? acEntries[0][1] : 1;
+                let accentColor = pickAccentFromCandidates(
+                    acEntries.map(([hex, cnt]) => ({ hex, weight: cnt })),
+                    bgColor
+                );
 
-                for (const [hex, cnt] of acEntries) {
-                    const r2 = parseInt(hex.slice(1,3), 16);
-                    const g2 = parseInt(hex.slice(3,5), 16);
-                    const b2 = parseInt(hex.slice(5,7), 16);
-                    const [hue, sat, lig] = rgbToHsl(r2, g2, b2);
-                    let hueDiff = Math.abs(hue - bgHue);
-                    if (hueDiff > 180) hueDiff = 360 - hueDiff;
-                    // [2026-05-30] 보색 가산점 제거 — 기존 (0.4 + hueDiff/180*0.6) 은 bg 의 보색(가장 hue 먼 색)에
-                    //   큰 가산점을 줘서, 히어로에 소량만 있는 보색(블루 히어로→노랑, 웜 히어로→핑크)이 빈도 낮아도 1등.
-                    //   → accent 가 "히어로에 없는 색"으로 뽑히는 구조적 편향. 이제 채도×빈도 = 실제 두드러진 색.
-                    //   bg 와 거의 같은 색(hueDiff<12 + 채도 유사)만 약하게 감점해 accent 가 bg 와 안 겹치게.
-                    const _tooCloseToBg = hueDiff < 12 ? 0.5 : 1;
-                    const score = sat * (cnt / topAcCount) * _tooCloseToBg;
-                    if (score > bestScore) { bestScore = score; accentColor = hex; }
-                }
-
-                // AC가 없으면 전체 픽셀에서 가장 채도 높은 색 강제 추출
+                // [SSOT 2026-06-04] 같은 계열 후보 전무 시 폴백 = bg hue 기반 같은-계열 accent 생성.
+                //   ⚠️ 기존 "전체 픽셀 중 최고 채도색" 폴백은 hue 게이트를 우회하는 누수였음:
+                //   파란 히어로의 파란색은 대부분 옅은 눈/하늘이라 AC 버킷(sat≥0.30)에서 탈락 →
+                //   같은계열 후보가 비면 최고채도 폴백이 로고의 금/주황 글로우를 집어 회귀(주황→골드).
+                //   bg(파랑)에서 결정론적으로 파랑 accent 를 합성하면 off-family 가 구조적으로 불가능.
                 if (!accentColor) {
-                    let maxSat = 0;
-                    for (const { r, g, b, sat, lig } of allPixels) {
-                        if (sat > maxSat && lig > 0.25 && lig < 0.88) {
-                            maxSat = sat;
-                            accentColor = toHex(Math.round(r/16)*16, Math.round(g/16)*16, Math.round(b/16)*16);
-                        }
-                    }
-                }
-
-                // 그래도 없으면 BG 색조의 보색으로 생성
-                if (!accentColor) {
-                    const compHue = (bgHue + 150) % 360;
-                    const [cr, cg, cb] = hslToRgb(compHue, 0.65, 0.55);
-                    accentColor = toHex(cr, cg, cb);
+                    accentColor = generatePalette(bgColor).accent;
                 }
 
                 // ── 5단계: WCAG 대비 보정 (최소 4.5:1 확보) ──

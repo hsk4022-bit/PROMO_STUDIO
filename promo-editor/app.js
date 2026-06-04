@@ -197,26 +197,20 @@
                 tagSectionsWithId(getById('contentArea'));
 
                 // 로드된 HTML에서 accent 감지 → accentPicker 동기화
+                //   [SSOT 2026-06-04] hue-family 게이트 적용. detectAccentFromDom 가 null 이면
+                //   같은 계열 후보 없음 → 기존 accentPicker 유지(off-family 주황 굳힘 방지).
                 setTimeout(function() {
                     const _loadArea = getById('contentArea');
                     if (!_loadArea) return;
-                    const _freq = {};
-                    _loadArea.querySelectorAll('[style]').forEach(el => {
-                        const _m = el.getAttribute('style').match(/#[0-9a-fA-F]{6}/g);
-                        if (_m) _m.forEach(c => { _freq[c.toLowerCase()] = (_freq[c.toLowerCase()] || 0) + 1; });
-                    });
-                    const _bg = (getById('bgPicker').value || '').toLowerCase();
-                    // accent 후보 필터 헬퍼는 color-palette.js (colorDistance / isNeutralColor) 공용.
-                    const _det = Object.entries(_freq)
-                        .filter(([c]) => c !== _bg && colorDistance(c, _bg) > 60 && !isNeutralColor(c))
-                        .sort((a,b2) => b2[1]-a[1])[0];
-                    if (_det) {
+                    const _acc = detectAccentFromDom(_loadArea, getById('bgPicker').value || '',
+                        { fallbackAccent: getById('accentPicker')?.value });
+                    if (_acc) {
                         const _p = getById('accentPicker');
-                        if (_p) { _p.value = _det[0]; _p.style.opacity = '1'; }
+                        if (_p) { _p.value = _acc; _p.style.opacity = '1'; }
                         const _s = getById('accentSlash');
                         if (_s) _s.style.display = 'none';
-                        getById('bgPicker').dataset.accent = _det[0];
-                        getById('bgPicker').dataset.prevAccent = _det[0];
+                        getById('bgPicker').dataset.accent = _acc;
+                        getById('bgPicker').dataset.prevAccent = _acc;
                         // accentPicker 값 확정 후 popup-trigger 전체 스타일 재적용
                         fixPopupTriggerStyles();
                     }
@@ -441,6 +435,26 @@
                     accentColor = autoPalette.accent;
                 }
 
+                // [SSOT 2026-06-04] accent hue-family 최종 강제 (point-of-truth backstop).
+                //   accentPicker 가 이전 생성물의 off-family 색(로고 주황 등 stale)을 들고 있어도,
+                //   bg(파랑)와 hue 90° 넘게 어긋나면 bg hue 기반 같은-계열 accent 로 교정.
+                //   입력 경로 게이트(pickAccentFromCandidates/detectAccentFromDom)는 새 오염만 막고
+                //   stale 값은 "기존 유지"로 오히려 보존 → 모든 생성이 지나는 이 길목에서 cleanse.
+                //   직후 syncPickerAfterBoost 가 교정값을 accentPicker UI 에도 되써 self-healing.
+                (function enforceAccentHueFamily() {
+                    if (!/^#[0-9a-fA-F]{6}$/.test(accentColor || '')) return;
+                    const [bgH, bgS] = hexToHsl(bgColor);
+                    if (bgS < 0.12) return;            // 무채색 bg → hue 기준 없음, 교정 안 함
+                    const [acH] = hexToHsl(accentColor);
+                    let d = Math.abs(acH - bgH); if (d > 180) d = 360 - d;
+                    if (d > 90) {
+                        const snapped = generatePalette(bgColor).accent;
+                        console.warn('[accent] off-family', accentColor, '→ bg-family', snapped,
+                            '(bg', bgColor + ', Δhue', Math.round(d) + '°)');
+                        accentColor = snapped;
+                    }
+                })();
+
                 // 사용자 지정 accent: 밝기 보정만 (채도 부스트 제거 — 원색 방지)
                 // generatePalette 결과는 이미 채도 제한됨
                 (function clampAccentSat() {
@@ -476,14 +490,33 @@
                 textColor   = _pal.text;
                 subColor    = _pal.sub;
                 const surfaceColor = _pal.surface;
-                // [2026-06-02] 라인 톤다운 — borderColor 를 흰색 쪽으로 블렌딩해 더 밝게 (사용자 요청).
-                //   위지윅(축소 표시→슬라이스 저장)과 다운로드 HTML(100% 렌더)이 같은 borderColor 를 쓰므로
-                //   둘 다 동일하게 연해져 결과물이 어긋나지 않음. 밝기 정도는 _LINE_LIGHTEN 으로 조절(0=원본,1=흰색).
+
+                // [2026-06-04] 다크 테마 accent → 밝은 아이스블루.
+                //   문제: 동일 cool hue accent 가 다크 네이비 bg 에 묻혀 "구분되는 포인트색"으로 안 읽힘 →
+                //   Gemini 가 ${accentColor} 무시하고 보색(빨강/골드)으로 제멋대로 교체 (라이트 테마엔 없음).
+                //   해결: 같은 cool family 안에서 명도를 끌어올리고 살짝 cyan 쪽으로(아이스 톤) → bg 와
+                //   명확히 분리되는 pop. (출력 강제 교체와 병행 — Gemini 가 그래도 어기면 후처리가 잡음.)
+                if (isDark) {
+                    const [ah, as, al] = hexToHsl(accentColor);
+                    const iceH = ((ah - 10) % 360 + 360) % 360;     // cool family 유지(±45 내), 아이스 쪽
+                    const iceS = Math.min(0.92, Math.max(as, 0.80)); // [2026-06-04] 채도 상향(0.62~0.82 → 0.80~0.92) — 키컬러 더 선명하게
+                    const iceL = Math.min(0.74, Math.max(al, 0.67)); // 더 밝게 → 다크 bg 위 pop
+                    accentColor = hslToHex(iceH, iceS, iceL);
+                }
+                // [2026-06-02] 라인 톤다운 (사용자 요청). 위지윅(축소→슬라이스)과 다운로드 HTML(100%)이 같은
+                //   borderColor 를 쓰므로 둘 다 동일하게 연해져 결과물 어긋남 없음.
+                //   - 라이트 테마: borderColor 를 흰색 쪽 _LINE_LIGHTEN 만큼 블렌딩해 연하게 (solid hex).
+                //   - 다크 테마: 흰색 rgba 저투명도로 은은하게 (_DARK_LINE). 흰색쪽 블렌딩은 다크 배경에서 라인이
+                //     너무 또렷해지는 문제 → 투명도 낮춰 부드럽게. (convertRgbToHex 가 rgba 4값은 보존하므로 export 안전)
                 //   영향: 표 행 구분선·표 상단 라인 + borderColor 쓰는 구분선(패턴 B 풀폭 border-top, 리스트 구분선) 공통.
-                const _LINE_LIGHTEN = 0.4;
-                const borderColor  = (typeof blendHex === 'function' && /^#[0-9a-fA-F]{6}$/.test(_pal.border || ''))
-                    ? blendHex(_pal.border, '#ffffff', _LINE_LIGHTEN)
-                    : _pal.border;
+                const _LINE_LIGHTEN = 0.4;       // 라이트 테마 흰색 블렌딩 정도 (0=원본,1=흰색)
+                const _DARK_LINE = 'rgba(255,255,255,0.12)'; // 다크 테마 라인 (투명도↓ = 더 은은). 0.12 → 조절 가능
+                const _bgForLine = _pal.bg || bgColor || '#ffffff';
+                const borderColor  = (typeof isDarkColor === 'function' && isDarkColor(_bgForLine))
+                    ? _DARK_LINE
+                    : ((typeof blendHex === 'function' && /^#[0-9a-fA-F]{6}$/.test(_pal.border || ''))
+                        ? blendHex(_pal.border, '#ffffff', _LINE_LIGHTEN)
+                        : _pal.border);
                 const thBgColor    = _pal.thBg;
                 const mutedColor   = _pal.muted;
                 // UI picker 동기화 — 사용자가 최종 결정된 색을 시각적으로 확인 가능
@@ -1256,6 +1289,16 @@ ${injectedGuideline}`;
                 // event-video URL 누락 복구 (occurrence 기반 safety net). → js/video.js
                 out = recoverMissingVideoUrls(out, data, ctx);
 
+                // [2026-06-05] 고아 event-video 속성 꼬리 제거 (Gemini 출력 artifact).
+                //   증상: 정상 event-video div 직후 `" data-stop data-controls>` 가 텍스트로 잔존 → 화면 노출(4 프리뷰 전부).
+                //   원인: Gemini 가 속성 많은 event-video 태그 재구성 시 꼬리(닫는 따옴표+data-opts+>)를 한 번 더 뱉음.
+                //   닫는 태그(</div>|</video>) 직후 + 따옴표(선택) + data-stop/controls/sound/once 1+개 + > 조각만 제거.
+                //   여는 태그(`<div ... data-src="URL" data-stop ...>`)는 </div> 앵커가 없어 매칭 안 됨 → 안전.
+                out = out.replace(
+                    /(<\/(?:div|video)>)\s*(?:"|&quot;)?\s*((?:data-(?:stop|controls|sound|once)\b\s*)+)(?:>|&gt;)/gi,
+                    '$1'
+                );
+
                 // event-video div → 정적 <video> 태그 치환 (2026-05-20: 스크립트 방식 폐기). → js/video.js
                 out = ensureEventVideoScript(out);
 
@@ -1341,36 +1384,60 @@ ${injectedGuideline}`;
                     }, 200);
                 } catch (_) {}
 
-                // accentPicker 자동 동기화: DOM 렌더링 후 실행
+                // accentPicker 동기화 + Gemini 비순응 교정: DOM 렌더링 후 실행
+                //   [2026-06-04] 확정 진단([accent-diag]): 프롬프트엔 enforce된 cool accent 가 갔는데
+                //   Gemini 가 다크 bg 에서 ${accentColor} 를 무시하고 보색(빨강/골드)으로 제멋대로 교체함.
+                //   변수는 이미 옳으니 → 출력을 변수에 강제로 맞춘다: 본문/팝업의 off-family(bg hue ±90° 밖)
+                //   색을 enforce된 accent 로 일괄 치환. 어떤 warm pop 색이든 cool accent 로 수렴.
                 setTimeout(function syncAccentPicker() {
                     const area = getById('contentArea');
-                    const freq = {};
-                    area.querySelectorAll('[style]').forEach(el => {
-                        const m = el.getAttribute('style').match(/#[0-9a-fA-F]{6}/g);
-                        if (m) m.forEach(c => { freq[c.toLowerCase()] = (freq[c.toLowerCase()] || 0) + 1; });
-                    });
-                    const bg = (getById('bgPicker').value || bgColor).toLowerCase();
-                    // accent 후보 필터 헬퍼는 color-palette.js (colorDistance / isNeutralColor) 공용.
-                    const detected = Object.entries(freq)
-                        .filter(([c]) => c !== bg && colorDistance(c, bg) > 60 && !isNeutralColor(c))
-                        .sort((a, b) => b[1] - a[1])[0];
-                    if (detected) {
+                    const enforced = accentColor;   // 프롬프트에 넘긴 enforce된 accent (다크=아이스블루)
+                    if (/^#[0-9a-fA-F]{6}$/.test(enforced || '')) {
+                        const areas = [area];
+                        childPanels.forEach(panel => { const ca = getById('childArea_' + panel.id); if (ca) areas.push(ca); });
+                        const bgLc = (getById('bgPicker').value || bgColor).toLowerCase();
+                        const [bgH, bgS] = hexToHsl(bgLc);
+                        const enfLc = enforced.toLowerCase();
+                        if (bgS >= 0.12) {           // 무채색 bg 면 hue 기준 없음 → 교체 안 함
+                            const offFamily = new Set();
+                            areas.forEach(a => a && a.querySelectorAll('[style]').forEach(el => {
+                                const m = el.getAttribute('style').match(/#[0-9a-fA-F]{6}/g);
+                                if (m) m.forEach(c => {
+                                    const lc = c.toLowerCase();
+                                    if (lc === bgLc || lc === enfLc || isNeutralColor(lc)) return;
+                                    const [h] = hexToHsl(lc);
+                                    let d = Math.abs(h - bgH); if (d > 180) d = 360 - d;
+                                    if (d > 90) offFamily.add(lc);   // bg 와 90° 넘는 이질(warm) 색
+                                });
+                            }));
+                            if (offFamily.size) {
+                                console.warn('[accent] Gemini off-family 출력', [...offFamily], '→ 강제 치환', enforced);
+                                offFamily.forEach(c => areas.forEach(a => a && replaceColorInContent(a, c, enforced)));
+                            }
+                        }
+                        // picker = enforce된 canonical accent (사후 감지로 덮지 않음)
                         const p = getById('accentPicker');
-                        if (p) { p.value = detected[0]; p.style.opacity = '1'; }
+                        if (p) { p.value = enforced; p.style.opacity = '1'; }
                         const slash = getById('accentSlash');
                         if (slash) slash.style.display = 'none';
-                        getById('bgPicker').dataset.accent = detected[0];
-                        getById('bgPicker').dataset.prevAccent = detected[0];
-                        // accent 감지 후 popup-trigger 버튼 색상 동기화
+                        getById('bgPicker').dataset.accent = enforced;
+                        getById('bgPicker').dataset.prevAccent = enforced;
                         fixPopupTriggerStyles(); protectAccentBars(); protectSectionCards();
                     }
 
-                    // ── 테이블 스타일 자동 통일 ──
-                    // AI가 생성한 테이블들의 스타일이 제각각일 때, 가장 많이 쓰인 스타일을 기준으로 전체 통일
-                    standardizeTableStyles(area);
+                    // [2026-06-04] 섹션 타이틀 구분선(border-top 라인) ↔ 컨텐츠 간격 확대 (결정론적).
+                    //   구조: 제목 row 다음 컨텐츠 블록이 border-top(=라인) + padding-top 0.75rem(12px) →
+                    //   라인 바로 아래 본문이 붙어 답답. 그 블록의 padding-top 만 키워 호흡 확보.
+                    //   대상: 가로 구분선(border-top:1px) 가진 div/p 중 padding-top 이 좁은(<20px) 것.
+                    area.querySelectorAll('div[style*="border-top"], p[style*="border-top"]').forEach(el => {
+                        if (!/border-top\s*:\s*1px/i.test(el.getAttribute('style') || '')) return;
+                        const pt = parseFloat(getComputedStyle(el).paddingTop) || 0;
+                        if (pt < 24) el.style.paddingTop = '1.75rem';   // 12px → 28px (룰: 소제목→콘텐츠 ~32px)
+                    });
 
-                    // 이미지 매칭은 위에서 이미 실행됨 (accent 감지 여부 무관)
-                    showToast(detected ? '디자인 완료! 키컬러 ' + detected[0] + ' 감지됨' : '디자인 완료!');
+                    // ── 테이블 스타일 자동 통일 ──
+                    standardizeTableStyles(area);
+                    showToast('디자인 완료! 포인트 컬러 ' + accentColor);
                 }, 200);
             } catch(e) {
                 console.error('[CG]', e);
